@@ -25,6 +25,7 @@ import {
 } from '@/features/api-keys/api/apiKeysApi'
 import { getUsageOverview } from '@/features/usage/api/usageApi'
 import type { UsageSummary, UserApiKeySummary } from '@/shared/types/api'
+import { copyToClipboard } from '@/shared/utils/clipboard'
 import { formatCompact, formatDateTime, formatInteger, formatUsd } from '@/shared/utils/format'
 
 const message = useMessage()
@@ -136,20 +137,13 @@ function toggleApiKeyVisibility(row: UserApiKeySummary) {
   visibleApiKeyHashes.value = nextVisible
 }
 
-async function copyText(text: string) {
-  if (!navigator.clipboard) {
-    throw new Error('当前浏览器不支持复制')
-  }
-  await navigator.clipboard.writeText(text)
-}
-
 async function copyApiKey(row: UserApiKeySummary) {
   try {
     if (!row.api_key) {
       message.info('当前没有完整密钥可复制')
       return
     }
-    await copyText(row.api_key)
+    await copyToClipboard(row.api_key)
     message.success('API 密钥已复制')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '复制失败')
@@ -161,7 +155,7 @@ async function copyGeneratedApiKey() {
     return
   }
   try {
-    await copyText(generatedApiKey.value)
+    await copyToClipboard(generatedApiKey.value)
     message.success('API 密钥已复制')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '复制失败')
@@ -362,7 +356,7 @@ onMounted(refresh)
       </div>
     </div>
 
-    <section class="panel">
+    <section class="panel api-key-panel-shell">
       <div class="panel-inner api-key-panel">
         <NAlert type="warning" :bordered="false">
           API 密钥拥有当前账号的完整权限，请妥善保管。
@@ -380,6 +374,7 @@ onMounted(refresh)
         </div>
 
         <NDataTable
+          class="api-key-table"
           size="small"
           :loading="isLoading"
           :columns="columns"
@@ -422,16 +417,28 @@ onMounted(refresh)
 .api-key-panel {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .api-key-metrics {
-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.api-key-panel-shell,
+.api-key-table {
+  min-width: 0;
+  min-height: 0;
+}
+
+.api-key-table :deep(.n-data-table-wrapper) {
+  overflow: hidden;
 }
 
 .generated-key-box {
   display: flex;
   justify-content: space-between;
   gap: 16px;
+  min-width: 0;
   padding: 16px;
   border: 1px solid var(--cpa-border);
   border-radius: var(--cpa-radius);
@@ -513,6 +520,7 @@ onMounted(refresh)
 }
 
 :global(.api-key-mask-text) {
+  display: block;
   min-width: 0;
   overflow: hidden;
   font-family: Consolas, 'SFMono-Regular', 'Microsoft YaHei UI', monospace;
@@ -552,6 +560,12 @@ onMounted(refresh)
 @media (max-width: 720px) {
   .api-key-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 430px) {
+  .api-key-metrics {
+    grid-template-columns: 1fr;
   }
 }
 </style>

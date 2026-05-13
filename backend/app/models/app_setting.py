@@ -15,7 +15,6 @@ class AppSetting(SQLModel, table=True):
     batch_size: int = Field(default=100)
     poll_interval_seconds: float = Field(default=2.0)
     retry_interval_seconds: float = Field(default=10.0)
-    theme_preference: str = Field(default="system", max_length=16)
     codex_keeper_settings: str = Field(
         default="{}",
         sa_column=Column(Text, nullable=False, default="{}"),

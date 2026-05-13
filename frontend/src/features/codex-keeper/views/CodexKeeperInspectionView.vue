@@ -40,6 +40,7 @@ import type {
   CodexKeeperSettingsUpdatePayload,
   CodexKeeperStatus,
 } from '@/shared/types/api'
+import { copyToClipboard } from '@/shared/utils/clipboard'
 import { formatDateTime, formatInteger } from '@/shared/utils/format'
 
 type LogTone = 'danger' | 'debug' | 'default' | 'info' | 'warning'
@@ -316,10 +317,7 @@ async function copyLogText() {
     return
   }
   try {
-    if (!navigator.clipboard) {
-      throw new Error('当前浏览器不支持复制')
-    }
-    await navigator.clipboard.writeText(logText.value)
+    await copyToClipboard(logText.value)
     message.success('维护日志已复制')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '复制失败')

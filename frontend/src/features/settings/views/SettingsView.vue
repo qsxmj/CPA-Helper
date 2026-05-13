@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import {
   NAlert,
   NButton,
@@ -9,7 +9,6 @@ import {
   NFormItem,
   NInput,
   NInputNumber,
-  NSelect,
   NSpace,
   NSwitch,
   NTag,
@@ -22,15 +21,13 @@ import {
   getSettings,
   updateSettings,
 } from '@/features/settings/api/settingsApi'
-import { useThemePreference } from '@/shared/composables/useThemePreference'
-import type { CollectorStatus, SettingsUpdatePayload, ThemePreference } from '@/shared/types/api'
+import type { CollectorStatus, SettingsUpdatePayload } from '@/shared/types/api'
 import { formatDateTime, formatInteger } from '@/shared/utils/format'
 
 const message = useMessage()
 const isLoading = ref(false)
 const isSaving = ref(false)
 const collectorStatus = ref<CollectorStatus | null>(null)
-const { preference, setThemePreference } = useThemePreference()
 
 const settingsForm = reactive({
   cliaproxy_url: 'http://127.0.0.1:8317',
@@ -39,7 +36,6 @@ const settingsForm = reactive({
   batch_size: 100,
   poll_interval_seconds: 2,
   retry_interval_seconds: 10,
-  theme_preference: 'system' as ThemePreference,
 })
 
 const remoteStatusType = computed(() => {
@@ -78,7 +74,6 @@ async function refresh() {
     settingsForm.batch_size = settings.batch_size
     settingsForm.poll_interval_seconds = settings.poll_interval_seconds
     settingsForm.retry_interval_seconds = settings.retry_interval_seconds
-    settingsForm.theme_preference = preference.value
     collectorStatus.value = status
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载设置失败')
@@ -97,11 +92,9 @@ async function saveSettings() {
       batch_size: settingsForm.batch_size,
       poll_interval_seconds: settingsForm.poll_interval_seconds,
       retry_interval_seconds: settingsForm.retry_interval_seconds,
-      theme_preference: settingsForm.theme_preference,
     }
     const saved = await updateSettings(payload)
     settingsForm.management_key = saved.management_key
-    setThemePreference(saved.theme_preference)
     message.success('设置已保存')
     await refresh()
   } catch (error) {
@@ -111,14 +104,6 @@ async function saveSettings() {
   }
 }
 
-watch(
-  preference,
-  (value) => {
-    settingsForm.theme_preference = value
-  },
-  { immediate: true },
-)
-
 onMounted(refresh)
 </script>
 
@@ -127,7 +112,7 @@ onMounted(refresh)
     <div class="page-header">
       <div>
         <h1 class="page-title">系统设置</h1>
-        <p class="page-subtitle">集中管理采集和主题</p>
+        <p class="page-subtitle">集中管理采集配置</p>
       </div>
       <NSpace>
         <NButton secondary :loading="isLoading" @click="refresh">刷新</NButton>
@@ -198,17 +183,6 @@ onMounted(refresh)
               </NFormItem>
               <NFormItem label="重试间隔（秒）">
                 <NInputNumber v-model:value="settingsForm.retry_interval_seconds" :min="1" />
-              </NFormItem>
-              <NFormItem label="主题偏好">
-                <NSelect
-                  v-model:value="settingsForm.theme_preference"
-                  :options="[
-                    { label: '跟随系统', value: 'system' },
-                    { label: '浅色', value: 'light' },
-                    { label: '暗色', value: 'dark' },
-                  ]"
-                  @update:value="(value: ThemePreference) => setThemePreference(value)"
-                />
               </NFormItem>
             </div>
           </NForm>

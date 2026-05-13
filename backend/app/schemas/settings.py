@@ -10,7 +10,6 @@ class SettingsResponse(BaseModel):
     batch_size: int
     poll_interval_seconds: float
     retry_interval_seconds: float
-    theme_preference: str
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -21,7 +20,6 @@ class SettingsUpdateRequest(BaseModel):
     batch_size: int | None = Field(default=None, ge=1, le=1000)
     poll_interval_seconds: float | None = Field(default=None, ge=0.2, le=3600)
     retry_interval_seconds: float | None = Field(default=None, ge=1, le=3600)
-    theme_preference: str | None = Field(default=None, pattern="^(system|light|dark)$")
 
     @field_validator("cliaproxy_url", "queue_name")
     @classmethod

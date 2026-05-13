@@ -52,7 +52,6 @@ class AppConfig(BaseModel):
     codex_keeper_priority_rules: dict[str, int] = Field(
         default_factory=lambda: dict(DEFAULT_CODEX_KEEPER_PRIORITY_RULES)
     )
-    theme_preference: str = "system"
     session_secret: str = Field(default_factory=create_secret)
 
 
@@ -77,7 +76,6 @@ def _read_legacy_config() -> AppConfig | None:
                 "codex_keeper_priority_rules",
                 DEFAULT_CODEX_KEEPER_PRIORITY_RULES,
             ),
-            "theme_preference": raw.get("theme_preference", "system"),
             "session_secret": raw.get("session_secret") or create_secret(),
         }
     )
@@ -124,7 +122,6 @@ def _setting_to_config(setting: AppSetting) -> AppConfig:
         ),
         codex_keeper=CodexKeeperConfig.model_validate(keeper_payload),
         codex_keeper_priority_rules=priority_rules,
-        theme_preference=setting.theme_preference,
         session_secret=setting.session_secret,
     )
 
@@ -139,7 +136,6 @@ def _setting_from_config(config: AppConfig, setting: AppSetting | None = None) -
     target.batch_size = config.collector.batch_size
     target.poll_interval_seconds = config.collector.poll_interval_seconds
     target.retry_interval_seconds = config.collector.retry_interval_seconds
-    target.theme_preference = config.theme_preference
     target.codex_keeper_settings = json.dumps(
         config.codex_keeper.model_dump(),
         ensure_ascii=False,

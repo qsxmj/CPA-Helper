@@ -68,7 +68,7 @@ Maintain model pricing and recalculate historical request costs using the latest
 
 **System settings**
 
-Configure the CLIProxyAPI / CPAMC endpoint, management key, local collector, polling options and theme preference.
+Configure the CLIProxyAPI / CPAMC endpoint, management key, local collector and polling options.
 
 ![System settings](pictures/系统设置.png)
 

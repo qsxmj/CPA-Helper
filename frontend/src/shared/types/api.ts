@@ -36,7 +36,6 @@ export interface SettingsResponse {
   batch_size: number
   poll_interval_seconds: number
   retry_interval_seconds: number
-  theme_preference: ThemePreference
 }
 
 export interface SettingsUpdatePayload {
@@ -47,7 +46,6 @@ export interface SettingsUpdatePayload {
   batch_size?: number
   poll_interval_seconds?: number
   retry_interval_seconds?: number
-  theme_preference?: ThemePreference
 }
 
 export interface CollectorStatus {

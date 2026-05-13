@@ -14,7 +14,6 @@ def settings_to_response(config: AppConfig | None = None) -> SettingsResponse:
         batch_size=collector.batch_size,
         poll_interval_seconds=collector.poll_interval_seconds,
         retry_interval_seconds=collector.retry_interval_seconds,
-        theme_preference=current.theme_preference,
     )
 
 
@@ -35,7 +34,5 @@ def update_settings(payload: SettingsUpdateRequest) -> SettingsResponse:
         collector.poll_interval_seconds = payload.poll_interval_seconds
     if payload.retry_interval_seconds is not None:
         collector.retry_interval_seconds = payload.retry_interval_seconds
-    if payload.theme_preference is not None:
-        config.theme_preference = payload.theme_preference
     save_config(config)
     return settings_to_response(config)

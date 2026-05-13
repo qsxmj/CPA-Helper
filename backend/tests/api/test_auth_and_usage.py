@@ -62,6 +62,7 @@ def test_first_login_requires_creating_first_admin(client: TestClient) -> None:
     assert settings.status_code == 200
     assert settings.json()["management_key"] == ""
     assert settings.json()["management_key_set"] is False
+    assert "theme_preference" not in settings.json()
 
 
 def test_first_admin_cannot_be_demoted_and_multiple_admins_are_allowed(
@@ -356,10 +357,12 @@ def test_settings_returns_full_management_key_for_admin(client: TestClient) -> N
     assert saved.status_code == 200
     assert saved.json()["management_key"] == "management-secret"
     assert saved.json()["management_key_set"] is True
+    assert "theme_preference" not in saved.json()
 
     loaded = client.get("/api/settings")
     assert loaded.status_code == 200
     assert loaded.json()["management_key"] == "management-secret"
+    assert "theme_preference" not in loaded.json()
 
     cleared = client.put("/api/settings", json={"management_key": "   "})
     assert cleared.status_code == 200
@@ -436,7 +439,7 @@ def test_legacy_json_config_is_migrated_to_sqlite(tmp_path, monkeypatch) -> None
             assert settings.status_code == 200
             assert settings.json()["management_key"] == "legacy-management-key"
             assert settings.json()["queue_name"] == "legacy-usage"
-            assert settings.json()["theme_preference"] == "dark"
+            assert "theme_preference" not in settings.json()
 
             with Session(get_engine()) as session:
                 setting = session.get(AppSetting, 1)
