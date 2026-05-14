@@ -6,15 +6,20 @@ from app.schemas.codex_keeper import (
     CodexKeeperActionResponse,
     CodexKeeperBulkDeleteRequest,
     CodexKeeperBulkDeleteResponse,
+    CodexKeeperBulkToggleRequest,
+    CodexKeeperBulkToggleResponse,
     CodexKeeperCronPreviewRequest,
     CodexKeeperCronPreviewResponse,
     CodexKeeperPriorityUpdateRequest,
+    CodexKeeperRunOnceRequest,
     CodexKeeperSettingsResponse,
     CodexKeeperSettingsUpdateRequest,
     CodexKeeperStatusResponse,
 )
 from app.services.codex_keeper_service import (
     bulk_delete_keeper_accounts,
+    bulk_disable_keeper_accounts,
+    bulk_enable_keeper_accounts,
     codex_keeper_runner,
     delete_keeper_account,
     disable_keeper_account,
@@ -61,8 +66,11 @@ def get_accounts(user: ReadyAdminDep) -> CodexKeeperAccountsResponse:
 
 
 @router.post("/run-once", response_model=CodexKeeperActionResponse)
-def run_once(user: ReadyAdminDep) -> CodexKeeperActionResponse:
-    codex_keeper_runner.start_once()
+def run_once(
+    user: ReadyAdminDep,
+    payload: CodexKeeperRunOnceRequest | None = None,
+) -> CodexKeeperActionResponse:
+    codex_keeper_runner.start_once(payload.auth_names if payload else None)
     return CodexKeeperActionResponse(status="started")
 
 
@@ -92,6 +100,22 @@ def bulk_delete_accounts(
     return bulk_delete_keeper_accounts(payload.auth_names)
 
 
+@router.post("/accounts/bulk-enable", response_model=CodexKeeperBulkToggleResponse)
+def bulk_enable_accounts(
+    payload: CodexKeeperBulkToggleRequest,
+    user: ReadyAdminDep,
+) -> CodexKeeperBulkToggleResponse:
+    return bulk_enable_keeper_accounts(payload.auth_names)
+
+
+@router.post("/accounts/bulk-disable", response_model=CodexKeeperBulkToggleResponse)
+def bulk_disable_accounts(
+    payload: CodexKeeperBulkToggleRequest,
+    user: ReadyAdminDep,
+) -> CodexKeeperBulkToggleResponse:
+    return bulk_disable_keeper_accounts(payload.auth_names)
+
+
 @router.post("/accounts/{auth_name}/enable", response_model=CodexKeeperActionResponse)
 def enable_account(auth_name: str, user: ReadyAdminDep) -> CodexKeeperActionResponse:
     enable_keeper_account(auth_name)
@@ -114,6 +138,7 @@ def delete_account(auth_name: str, user: ReadyAdminDep) -> CodexKeeperActionResp
 def update_priority(
     auth_name: str,
     payload: CodexKeeperPriorityUpdateRequest,
+    CodexKeeperRunOnceRequest,
     user: ReadyAdminDep,
 ) -> CodexKeeperActionResponse:
     update_keeper_account_priority(auth_name, payload.priority)

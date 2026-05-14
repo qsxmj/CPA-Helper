@@ -78,23 +78,46 @@ class CodexKeeperActionResponse(BaseModel):
     status: str
 
 
-class CodexKeeperBulkDeleteRequest(BaseModel):
+class CodexKeeperRunOnceRequest(BaseModel):
+    auth_names: list[str] | None = None
+
+    @field_validator("auth_names")
+    @classmethod
+    def normalize_auth_names(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return _normalize_auth_names(value)
+
+
+def _normalize_auth_names(value: list[str]) -> list[str]:
+    seen: set[str] = set()
+    auth_names: list[str] = []
+    for raw_name in value:
+        name = raw_name.strip()
+        if not name:
+            raise ValueError("账号名称不能为空")
+        if name in seen:
+            continue
+        seen.add(name)
+        auth_names.append(name)
+    return auth_names
+
+
+class CodexKeeperBulkActionRequest(BaseModel):
     auth_names: list[str] = Field(min_length=1)
 
     @field_validator("auth_names")
     @classmethod
     def normalize_auth_names(cls, value: list[str]) -> list[str]:
-        seen: set[str] = set()
-        auth_names: list[str] = []
-        for raw_name in value:
-            name = raw_name.strip()
-            if not name:
-                raise ValueError("账号名称不能为空")
-            if name in seen:
-                continue
-            seen.add(name)
-            auth_names.append(name)
-        return auth_names
+        return _normalize_auth_names(value)
+
+
+class CodexKeeperBulkDeleteRequest(CodexKeeperBulkActionRequest):
+    pass
+
+
+class CodexKeeperBulkToggleRequest(CodexKeeperBulkActionRequest):
+    pass
 
 
 class CodexKeeperBulkDeleteFailure(BaseModel):
@@ -106,6 +129,17 @@ class CodexKeeperBulkDeleteResponse(BaseModel):
     status: str
     deleted: list[str]
     failed: list[CodexKeeperBulkDeleteFailure]
+
+
+class CodexKeeperBulkToggleFailure(BaseModel):
+    name: str
+    message: str
+
+
+class CodexKeeperBulkToggleResponse(BaseModel):
+    status: str
+    updated: list[str]
+    failed: list[CodexKeeperBulkToggleFailure]
 
 
 class CodexKeeperPriorityUpdateRequest(BaseModel):

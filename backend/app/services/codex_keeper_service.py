@@ -30,6 +30,8 @@ from app.schemas.codex_keeper import (
     CodexKeeperAccountsResponse,
     CodexKeeperBulkDeleteFailure,
     CodexKeeperBulkDeleteResponse,
+    CodexKeeperBulkToggleFailure,
+    CodexKeeperBulkToggleResponse,
     CodexKeeperCronPreviewResponse,
     CodexKeeperPriorityRule,
     CodexKeeperSettingsResponse,
@@ -324,10 +326,17 @@ class CodexKeeperService:
     def stop_requested(self) -> bool:
         return self._stop_event.is_set()
 
-    def run_once(self) -> KeeperStats:
+    def run_once(self, target_auth_names: set[str] | None = None) -> KeeperStats:
         stats = KeeperStats()
-        self._log("开始 Codex 账号巡检")
+        target_names = {name for name in (target_auth_names or set()) if name}
+        self._log("开始 Codex 账号巡检" if not target_names else f"开始 Codex 账号定向巡检：{len(target_names)} 个")
         auth_files = [item for item in self.cpa_client.list_auth_files() if _is_codex_auth(item)]
+        if target_names:
+            auth_files = [
+                item
+                for item in auth_files
+                if (_string_value(item.get("name")) or "") in target_names
+            ]
         auth_names = {
             name
             for item in auth_files
@@ -962,11 +971,11 @@ class CodexKeeperRunner:
         with self._lock:
             self._load_persisted_state_locked()
 
-    def start_once(self) -> None:
-        self._start(daemon=False, mode="run_once")
+    def start_once(self, auth_names: list[str] | None = None) -> None:
+        self._start(daemon=False, mode="run_once", auth_names=auth_names)
 
     def start_daemon(self) -> None:
-        self._start(daemon=True, mode="daemon")
+        self._start(daemon=True, mode="daemon", auth_names=None)
 
     def start_auto_if_configured(self) -> None:
         config = load_config()
@@ -1009,7 +1018,7 @@ class CodexKeeperRunner:
                 logs=list(self._logs),
             )
 
-    def _start(self, *, daemon: bool, mode: str) -> None:
+    def _start(self, *, daemon: bool, mode: str, auth_names: list[str] | None = None) -> None:
         with self._lock:
             self._load_persisted_state_locked()
             if self._thread is not None and self._thread.is_alive():
@@ -1039,16 +1048,17 @@ class CodexKeeperRunner:
                 stats_callback=self._set_stats,
                 run_id=run_id,
             )
-            target = self._run_daemon if daemon else self._run_once
+            target_auth_names = list(dict.fromkeys(auth_names or []))
+            target = self._run_daemon if daemon else (lambda: self._run_once(target_auth_names))
             self._thread = threading.Thread(target=target, name="codex-keeper", daemon=True)
             self._thread.start()
 
-    def _run_once(self) -> None:
+    def _run_once(self, auth_names: list[str] | None = None) -> None:
         service = self._service
         if service is None:
             return
         try:
-            stats = service.run_once()
+            stats = service.run_once(set(auth_names or []))
             self._finish("stopped", "已停止", stats)
         except Exception as exc:
             logger.exception("Codex keeper run failed")
@@ -1425,6 +1435,7 @@ def preview_keeper_cron(schedule_cron: str) -> CodexKeeperCronPreviewResponse:
 
 
 def list_keeper_accounts() -> CodexKeeperAccountsResponse:
+    _sync_keeper_states_from_auth_files()
     states = _load_keeper_states()
     items = [_state_account_response(state) for state in states.values()]
     items.sort(key=lambda item: (item.email or "", item.name))
@@ -1434,37 +1445,68 @@ def list_keeper_accounts() -> CodexKeeperAccountsResponse:
 def enable_keeper_account(auth_name: str) -> None:
     settings, _ = build_runtime_settings()
     with Session(get_engine()) as session:
-        state = session.get(CodexKeeperAuthState, auth_name)
-        if state is None:
-            raise NotFoundError("账号状态不存在")
-        KeeperCPAClient(settings).set_auth_disabled(auth_name, False)
-        state.disabled = False
-        state.latest_action = None
-        state.last_error = None
-        state.last_status_code = None
-        state.updated_at = datetime.now()
-        session.add(state)
-        session.commit()
+        _set_keeper_account_disabled(session, KeeperCPAClient(settings), auth_name, False)
 
 
 def disable_keeper_account(auth_name: str) -> None:
     settings, _ = build_runtime_settings()
     with Session(get_engine()) as session:
-        state = session.get(CodexKeeperAuthState, auth_name)
-        if state is None:
-            raise NotFoundError("账号状态不存在")
-        KeeperCPAClient(settings).set_auth_disabled(auth_name, True)
-        state.disabled = True
+        _set_keeper_account_disabled(session, KeeperCPAClient(settings), auth_name, True)
+
+
+def bulk_enable_keeper_accounts(auth_names: list[str]) -> CodexKeeperBulkToggleResponse:
+    return _bulk_set_keeper_account_disabled(auth_names, False)
+
+
+def bulk_disable_keeper_accounts(auth_names: list[str]) -> CodexKeeperBulkToggleResponse:
+    return _bulk_set_keeper_account_disabled(auth_names, True)
+
+
+
+def _bulk_set_keeper_account_disabled(
+    auth_names: list[str],
+    disabled: bool,
+) -> CodexKeeperBulkToggleResponse:
+    settings, _ = build_runtime_settings()
+    cpa_client = KeeperCPAClient(settings)
+    updated: list[str] = []
+    failed: list[CodexKeeperBulkToggleFailure] = []
+
+    for auth_name in _normalize_bulk_action_auth_names(auth_names):
+        with Session(get_engine()) as session:
+            try:
+                _set_keeper_account_disabled(session, cpa_client, auth_name, disabled)
+            except AppError as exc:
+                session.rollback()
+                failed.append(CodexKeeperBulkToggleFailure(name=auth_name, message=exc.message))
+                continue
+        updated.append(auth_name)
+
+    return CodexKeeperBulkToggleResponse(status="completed", updated=updated, failed=failed)
+
+
+def _set_keeper_account_disabled(
+    session: Session,
+    cpa_client: KeeperCPAClientProtocol,
+    auth_name: str,
+    disabled: bool,
+) -> None:
+    state = session.get(CodexKeeperAuthState, auth_name)
+    if state is None:
+        raise NotFoundError("账号状态不存在")
+    cpa_client.set_auth_disabled(auth_name, disabled)
+    state.disabled = disabled
+    state.latest_action = None
+    state.last_error = None
+    state.last_status_code = None
+    if disabled:
         state.restore_priority = None
-        state.latest_action = None
-        state.last_error = None
-        state.last_status_code = None
         _clear_usage_state(state)
         state.last_checked_at = datetime.now()
         state.last_healthy_at = None
-        state.updated_at = datetime.now()
-        session.add(state)
-        session.commit()
+    state.updated_at = datetime.now()
+    session.add(state)
+    session.commit()
 
 
 def delete_keeper_account(auth_name: str) -> None:
@@ -1479,7 +1521,7 @@ def bulk_delete_keeper_accounts(auth_names: list[str]) -> CodexKeeperBulkDeleteR
     deleted: list[str] = []
     failed: list[CodexKeeperBulkDeleteFailure] = []
 
-    for auth_name in _normalize_bulk_delete_auth_names(auth_names):
+    for auth_name in _normalize_bulk_action_auth_names(auth_names):
         with Session(get_engine()) as session:
             try:
                 _delete_keeper_account_state(session, cpa_client, auth_name)
@@ -1530,7 +1572,7 @@ def _delete_keeper_account_state(
     session.commit()
 
 
-def _normalize_bulk_delete_auth_names(auth_names: list[str]) -> list[str]:
+def _normalize_bulk_action_auth_names(auth_names: list[str]) -> list[str]:
     seen: set[str] = set()
     normalized: list[str] = []
     for raw_name in auth_names:
@@ -1638,6 +1680,8 @@ def classify_account_type(usage: KeeperUsageInfo, detail: dict[str, Any]) -> str
         detail.get("account_plan"),
         detail.get("subscription_plan"),
         detail.get("sku"),
+        detail.get("name"),
+        detail.get("email"),
     ]
     text = " ".join(str(value).lower() for value in values if value not in (None, ""))
     compact = text.replace("-", "_").replace(" ", "_")
@@ -1684,6 +1728,36 @@ def _load_keeper_states() -> dict[str, CodexKeeperAuthState]:
             state.auth_name: state
             for state in session.exec(select(CodexKeeperAuthState)).all()
         }
+
+
+def _sync_keeper_states_from_auth_files() -> None:
+    settings, _ = build_runtime_settings()
+    client = KeeperCPAClient(settings)
+    auth_files = [item for item in client.list_auth_files() if _is_codex_auth(item)]
+    auth_names = {
+        name
+        for item in auth_files
+        if (name := _string_value(item.get("name"))) is not None
+    }
+    _delete_missing_keeper_states(auth_names)
+    now = datetime.now()
+    with Session(get_engine()) as session:
+        for auth_info in auth_files:
+            name = _string_value(auth_info.get("name"))
+            if name is None:
+                continue
+            state = _state_for_update(session, name)
+            state.email = _string_value(auth_info.get("email"))
+            account_type = _account_type_from_detail(auth_info)
+            if account_type is not None:
+                state.account_type = account_type
+            state.disabled = _bool_value(auth_info.get("disabled"))
+            priority = _int_value(auth_info.get("priority"))
+            if priority is not None:
+                state.priority = priority
+            state.updated_at = now
+            session.add(state)
+        session.commit()
 
 
 def _state_account_response(state: CodexKeeperAuthState) -> CodexKeeperAccount:

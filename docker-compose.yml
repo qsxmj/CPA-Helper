@@ -1,9 +1,11 @@
 services:
   cpa-helper:
-    image: walkingd/cpa-helper:latest
+    build: .
+    image: cpa-helper:local
     container_name: cpa-helper
     restart: always
-    network_mode: host
+    environment:
+      - TZ=Asia/Shanghai
     ports:
       - "18317:18317"
     volumes:

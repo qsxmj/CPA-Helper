@@ -23,11 +23,14 @@ import { Activity, AlertTriangle, Gauge, PauseCircle, RefreshCw, Users, Zap } fr
 
 import {
   bulkDeleteCodexKeeperAccounts,
+  bulkDisableCodexKeeperAccounts,
+  bulkEnableCodexKeeperAccounts,
   deleteCodexKeeperAccount,
   disableCodexKeeperAccount,
   enableCodexKeeperAccount,
   getCodexKeeperSettings,
   listCodexKeeperAccounts,
+  runCodexKeeperOnce,
   updateCodexKeeperPriority,
 } from '@/features/codex-keeper/api/codexKeeperApi'
 import type { CodexKeeperAccount, CodexKeeperPriorityRule } from '@/shared/types/api'
@@ -39,21 +42,60 @@ type PriorityFilter = FixedPriorityFilter | PriorityTypeFilter
 type PriorityMode = 'low' | 'high' | 'default'
 type AccountAction = 'toggle' | 'priority' | 'delete'
 type QuotaWindowItem = { label: string; remainingPercent: number; resetAt: string | null }
+type AccountColumnKey =
+  | 'name'
+  | 'email'
+  | 'account_type'
+  | 'disabled'
+  | 'priority'
+  | 'quota'
+  | 'last_checked_at'
+  | 'latest_action'
+  | 'free_weekly_reset'
+
+const accountColumnOptions: Array<{ label: string; value: AccountColumnKey }> = [
+  { label: '账号', value: 'name' },
+  { label: '邮箱', value: 'email' },
+  { label: '类型', value: 'account_type' },
+  { label: '状态', value: 'disabled' },
+  { label: '优先级', value: 'priority' },
+  { label: '额度窗口', value: 'quota' },
+  { label: '最近巡检', value: 'last_checked_at' },
+  { label: '最近操作', value: 'latest_action' },
+]
+const disabledColumnOptions: Array<{ label: string; value: AccountColumnKey }> = [
+  ...accountColumnOptions,
+  { label: 'free周刷新', value: 'free_weekly_reset' },
+]
+const defaultAccountColumnKeys: AccountColumnKey[] = accountColumnOptions.map((option) => option.value)
+const defaultDisabledColumnKeys: AccountColumnKey[] = disabledColumnOptions.map((option) => option.value)
 
 const accountTablePagination = { pageSize: 18, pageSlot: 7 }
-const disabledTableScrollX = 1810
+const disabledPageSize = ref(8)
+const disabledTableScrollX = 1970
 const normalTableScrollX = 1770
 const message = useMessage()
 const isLoading = ref(false)
 const isBulkDeleting = ref(false)
+const isBulkToggling = ref(false)
+const isBulkChecking = ref(false)
 const actingActions = ref<Set<string>>(new Set())
 const accounts = ref<CodexKeeperAccount[]>([])
 const priorityRules = ref<CodexKeeperPriorityRule[]>([])
 const selectedAccount = ref<CodexKeeperAccount | null>(null)
 const selectedDisabledAccountKeys = ref<DataTableRowKey[]>([])
+const selectedNormalAccountKeys = ref<DataTableRowKey[]>([])
+const visibleDisabledColumnKeys = ref<AccountColumnKey[]>([...defaultDisabledColumnKeys])
+const visibleNormalColumnKeys = ref<AccountColumnKey[]>([...defaultAccountColumnKeys])
 const detailOpen = ref(false)
 const filters = reactive({
   keyword: '',
+})
+const disabledFilters = reactive({
+  accountType: null as string | null,
+  priority: 'all' as PriorityFilter,
+})
+const normalFilters = reactive({
   accountType: null as string | null,
   priority: 'all' as PriorityFilter,
 })
@@ -95,26 +137,24 @@ const accountTypeOptions = computed(() =>
     .map((value) => ({ label: String(value), value: String(value) })),
 )
 
-const filteredAccounts = computed(() =>
+const keywordFilteredAccounts = computed(() =>
   accounts.value.filter((account) => {
     const keyword = filters.keyword.trim().toLowerCase()
-    if (
-      keyword &&
-      ![account.name, account.email ?? ''].some((value) => value.toLowerCase().includes(keyword))
-    ) {
-      return false
-    }
-    if (filters.accountType && account.account_type !== filters.accountType) {
-      return false
-    }
-    return matchesPriorityFilter(account, filters.priority)
+    return (
+      !keyword ||
+      [account.name, account.email ?? ''].some((value) => value.toLowerCase().includes(keyword))
+    )
   }),
 )
 const filteredDisabledAccounts = computed(() =>
-  filteredAccounts.value.filter((account) => account.disabled),
+  keywordFilteredAccounts.value.filter(
+    (account) => account.disabled && matchesAccountTableFilters(account, disabledFilters),
+  ),
 )
 const filteredNormalAccounts = computed(() =>
-  filteredAccounts.value.filter((account) => !account.disabled).sort(compareNormalAccounts),
+  keywordFilteredAccounts.value
+    .filter((account) => !account.disabled && matchesAccountTableFilters(account, normalFilters))
+    .sort(compareNormalAccounts),
 )
 const tableLoading = computed(() => isLoading.value)
 const enabledAccountCount = computed(() => accounts.value.filter((account) => !account.disabled).length)
@@ -137,17 +177,29 @@ const highPriorityCount = computed(
 const activeFilterCount = computed(
   () =>
     Number(filters.keyword.trim() !== '') +
-    Number(filters.accountType !== null) +
-    Number(filters.priority !== 'all'),
+    Number(disabledFilters.accountType !== null) +
+    Number(disabledFilters.priority !== 'all') +
+    Number(normalFilters.accountType !== null) +
+    Number(normalFilters.priority !== 'all'),
 )
-const disabledAccountPagination = computed(() =>
-  filteredDisabledAccounts.value.length > 8 ? { pageSize: 8, pageSlot: 5 } : false,
-)
+const disabledAccountPagination = computed(() => {
+  const pageSize = disabledPageSize.value
+  return filteredDisabledAccounts.value.length > pageSize ? { pageSize, pageSlot: 5 } : false
+})
 const selectedDisabledAccountNames = computed(() =>
   selectedDisabledAccountKeys.value.map((key) => String(key)),
 )
+const selectedNormalAccountNames = computed(() =>
+  selectedNormalAccountKeys.value.map((key) => String(key)),
+)
 const selectedDisabledCount = computed(() => selectedDisabledAccountNames.value.length)
-const canBulkDelete = computed(() => selectedDisabledCount.value > 0 && !isBulkDeleting.value)
+const selectedNormalCount = computed(() => selectedNormalAccountNames.value.length)
+const isAnyBulkAction = computed(() => isBulkDeleting.value || isBulkToggling.value || isBulkChecking.value)
+const canBulkDelete = computed(() => selectedDisabledCount.value > 0 && !isAnyBulkAction.value)
+const canBulkEnable = computed(() => selectedDisabledCount.value > 0 && !isAnyBulkAction.value)
+const canBulkCheckDisabled = computed(() => selectedDisabledCount.value > 0 && !isAnyBulkAction.value)
+const canBulkDisable = computed(() => selectedNormalCount.value > 0 && !isAnyBulkAction.value)
+const canBulkCheckNormal = computed(() => selectedNormalCount.value > 0 && !isAnyBulkAction.value)
 const bulkDeletePreviewNames = computed(() => selectedDisabledAccountNames.value.slice(0, 5))
 const bulkDeletePreviewOverflow = computed(() =>
   Math.max(0, selectedDisabledCount.value - bulkDeletePreviewNames.value.length),
@@ -198,24 +250,34 @@ const priorityModeOptions = computed(() => {
   ]
 })
 
+function matchesAccountTableFilters(
+  account: CodexKeeperAccount,
+  tableFilters: { accountType: string | null; priority: PriorityFilter },
+): boolean {
+  if (tableFilters.accountType && account.account_type !== tableFilters.accountType) {
+    return false
+  }
+  return matchesPriorityFilter(account, tableFilters.priority)
+}
+
+function effectivePriority(account: CodexKeeperAccount): number | null {
+  return account.priority ?? defaultPriority(account)
+}
+
 function matchesPriorityFilter(account: CodexKeeperAccount, value: PriorityFilter): boolean {
+  const priority = effectivePriority(account)
   if (value === 'high') {
-    return account.priority !== null && account.priority > 20
+    return priority !== null && priority > 20
   }
   if (value === 'minusOne') {
-    return account.priority === -1
+    return priority === -1
   }
   if (value === 'low') {
-    return account.priority !== null && account.priority < -1
+    return priority !== null && priority < -1
   }
   const accountType = priorityTypeFromFilter(value)
   if (accountType !== null) {
-    return (
-      account.account_type === accountType &&
-      account.priority !== null &&
-      account.priority >= 0 &&
-      account.priority <= 20
-    )
+    return account.account_type === accountType && priority !== null && priority >= 0 && priority <= 20
   }
   return true
 }
@@ -319,6 +381,29 @@ function formatQuotaResetTime(value: string | null): string | null {
   }).format(date)
 }
 
+function isFreeAccount(account: CodexKeeperAccount): boolean {
+  return account.account_type?.trim().toLowerCase() === 'free'
+}
+
+function freeWeeklyResetText(account: CodexKeeperAccount): string {
+  if (!isFreeAccount(account)) {
+    return '-'
+  }
+  const resetTime = formatQuotaResetTime(account.primary_reset_at)
+  return resetTime ?? '未记录'
+}
+
+function freeWeeklyResetTitle(account: CodexKeeperAccount): string {
+  if (!isFreeAccount(account)) {
+    return '仅 free 账号显示周限额刷新时间'
+  }
+  const resetTime = formatQuotaResetTime(account.primary_reset_at)
+  const checkedTime = formatDateTime(account.last_checked_at)
+  return resetTime
+    ? `free 号周限额预计刷新：${resetTime}；最近巡检：${checkedTime}`
+    : `free 号尚未记录周限额刷新时间；最近巡检：${checkedTime}`
+}
+
 function quotaText(account: CodexKeeperAccount): string {
   const items = quotaWindowItems(account)
   if (items.length === 0) {
@@ -400,9 +485,20 @@ function handleDisabledSelectionUpdate(keys: DataTableRowKey[]) {
   selectedDisabledAccountKeys.value = keys
 }
 
+function handleNormalSelectionUpdate(keys: DataTableRowKey[]) {
+  selectedNormalAccountKeys.value = keys
+}
+
 function pruneSelectedDisabledAccountKeys() {
   const availableNames = new Set(filteredDisabledAccounts.value.map((account) => account.name))
   selectedDisabledAccountKeys.value = selectedDisabledAccountKeys.value.filter((key) =>
+    availableNames.has(String(key)),
+  )
+}
+
+function pruneSelectedNormalAccountKeys() {
+  const availableNames = new Set(filteredNormalAccounts.value.map((account) => account.name))
+  selectedNormalAccountKeys.value = selectedNormalAccountKeys.value.filter((key) =>
     availableNames.has(String(key)),
   )
 }
@@ -439,6 +535,75 @@ async function submitBulkDelete() {
     message.error(error instanceof Error ? error.message : '批量删除失败')
   } finally {
     isBulkDeleting.value = false
+  }
+}
+
+async function submitBulkEnable() {
+  const authNames = selectedDisabledAccountNames.value
+  if (authNames.length === 0) {
+    return
+  }
+  isBulkToggling.value = true
+  try {
+    const result = await bulkEnableCodexKeeperAccounts({ auth_names: authNames })
+    const updatedNames = new Set(result.updated)
+    selectedDisabledAccountKeys.value = selectedDisabledAccountKeys.value.filter(
+      (key) => !updatedNames.has(String(key)),
+    )
+    if (result.failed.length > 0 && result.updated.length > 0) {
+      message.warning(`批量启用完成：成功 ${result.updated.length} 个，失败 ${result.failed.length} 个`)
+    } else if (result.failed.length > 0) {
+      message.error(`批量启用失败：失败 ${result.failed.length} 个`)
+    } else {
+      message.success(`已启用 ${result.updated.length} 个账号`)
+    }
+    await loadAccounts()
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '批量启用失败')
+  } finally {
+    isBulkToggling.value = false
+  }
+}
+
+async function submitBulkDisable() {
+  const authNames = selectedNormalAccountNames.value
+  if (authNames.length === 0) {
+    return
+  }
+  isBulkToggling.value = true
+  try {
+    const result = await bulkDisableCodexKeeperAccounts({ auth_names: authNames })
+    const updatedNames = new Set(result.updated)
+    selectedNormalAccountKeys.value = selectedNormalAccountKeys.value.filter(
+      (key) => !updatedNames.has(String(key)),
+    )
+    if (result.failed.length > 0 && result.updated.length > 0) {
+      message.warning(`批量禁用完成：成功 ${result.updated.length} 个，失败 ${result.failed.length} 个`)
+    } else if (result.failed.length > 0) {
+      message.error(`批量禁用失败：失败 ${result.failed.length} 个`)
+    } else {
+      message.success(`已禁用 ${result.updated.length} 个账号`)
+    }
+    await loadAccounts()
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '批量禁用失败')
+  } finally {
+    isBulkToggling.value = false
+  }
+}
+
+async function submitBulkCheck(authNames: string[]) {
+  if (authNames.length === 0) {
+    return
+  }
+  isBulkChecking.value = true
+  try {
+    await runCodexKeeperOnce({ auth_names: authNames })
+    message.success(`已启动 ${authNames.length} 个账号的额度巡检`)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '启动额度巡检失败')
+  } finally {
+    isBulkChecking.value = false
   }
 }
 
@@ -721,22 +886,66 @@ const normalActionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
   },
 }
 
-const disabledColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
-  {
-    type: 'selection',
-    width: 44,
-    disabled: (row: CodexKeeperAccount) => isRowActing(row) || isBulkDeleting.value,
+const selectionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
+  type: 'selection',
+  width: 44,
+  disabled: (row: CodexKeeperAccount) => isRowActing(row) || isAnyBulkAction.value,
+}
+
+const freeWeeklyResetColumn: DataTableColumns<CodexKeeperAccount>[number] = {
+  title: 'free周刷新',
+  key: 'free_weekly_reset',
+  width: 160,
+  render: (row: CodexKeeperAccount) => {
+    const text = freeWeeklyResetText(row)
+    const isKnownFreeReset = isFreeAccount(row) && text !== '未记录'
+    return h(
+      'span',
+      {
+        class: ['free-weekly-reset', isKnownFreeReset ? 'is-known' : ''],
+        title: freeWeeklyResetTitle(row),
+      },
+      text,
+    )
   },
+}
+
+function getAccountColumnKey(column: DataTableColumns<CodexKeeperAccount>[number]): AccountColumnKey | null {
+  const key = (column as { key?: unknown }).key
+  return typeof key === 'string' && disabledColumnOptions.some((option) => option.value === key)
+    ? (key as AccountColumnKey)
+    : null
+}
+
+const disabledDisplayColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
   ...baseColumns,
+  freeWeeklyResetColumn,
+].filter((column) => {
+  const key = getAccountColumnKey(column)
+  return key !== null && visibleDisabledColumnKeys.value.includes(key)
+}))
+
+const normalDisplayColumns = computed<DataTableColumns<CodexKeeperAccount>>(() =>
+  baseColumns.filter((column) => {
+    const key = getAccountColumnKey(column)
+    return key !== null && visibleNormalColumnKeys.value.includes(key)
+  }),
+)
+
+const disabledColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
+  selectionColumn,
+  ...disabledDisplayColumns.value,
   disabledActionColumn,
 ])
 
 const normalColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
-  ...baseColumns,
+  selectionColumn,
+  ...normalDisplayColumns.value,
   normalActionColumn,
 ])
 
 watch(filteredDisabledAccounts, pruneSelectedDisabledAccountKeys)
+watch(filteredNormalAccounts, pruneSelectedNormalAccountKeys)
 
 onMounted(loadAccounts)
 </script>
@@ -825,19 +1034,8 @@ onMounted(loadAccounts)
             已筛选 {{ activeFilterCount }} 项
           </NTag>
         </div>
-        <div class="filter-grid">
-          <NInput v-model:value="filters.keyword" clearable placeholder="搜索账号或邮箱" />
-          <NSelect
-            v-model:value="filters.accountType"
-            :options="accountTypeOptions"
-            clearable
-            filterable
-            placeholder="账号类型"
-          />
-          <NSelect
-            v-model:value="filters.priority"
-            :options="priorityFilterOptions"
-          />
+        <div class="filter-grid is-keyword-only">
+          <NInput v-model:value="filters.keyword" clearable placeholder="搜索全部账号或邮箱" />
         </div>
       </div>
 
@@ -850,7 +1048,62 @@ onMounted(loadAccounts)
                 显示 {{ filteredDisabledAccounts.length }} / {{ disabledAccountCount }} 个账号
               </p>
             </div>
+            <div class="account-section-controls">
+            <div class="account-section-filter-row">
+              <NSelect
+                v-model:value="disabledFilters.accountType"
+                :options="accountTypeOptions"
+                clearable
+                filterable
+                size="small"
+                placeholder="已禁用类型"
+              />
+              <NSelect
+                v-model:value="disabledFilters.priority"
+                :options="priorityFilterOptions"
+                size="small"
+                placeholder="已禁用优先级"
+              />
+              <NSelect
+                v-model:value="visibleDisabledColumnKeys"
+                :options="disabledColumnOptions"
+                multiple
+                size="small"
+                placeholder="显示列类目"
+                class="account-column-select"
+              />
+            </div>
             <div class="account-section-actions">
+              <div class="disabled-page-size-control">
+                <span>每页</span>
+                <NInputNumber
+                  v-model:value="disabledPageSize"
+                  size="small"
+                  :min="1"
+                  :max="200"
+                  :precision="0"
+                  :show-button="false"
+                />
+                <span>条</span>
+              </div>
+              <NButton
+                secondary
+                type="success"
+                :disabled="!canBulkEnable"
+                :loading="isBulkToggling"
+                @click="submitBulkEnable"
+              >
+                批量启用（{{ selectedDisabledCount }}）
+              </NButton>
+              <NButton
+                secondary
+                type="info"
+                :disabled="!canBulkCheckDisabled"
+                :loading="isBulkChecking"
+                @click="submitBulkCheck(selectedDisabledAccountNames)"
+              >
+                查额度（{{ selectedDisabledCount }}）
+              </NButton>
               <NButton
                 secondary
                 type="error"
@@ -860,6 +1113,7 @@ onMounted(loadAccounts)
               >
                 批量删除（{{ selectedDisabledCount }}）
               </NButton>
+            </div>
             </div>
           </div>
           <NDataTable
@@ -889,6 +1143,52 @@ onMounted(loadAccounts)
                 显示 {{ filteredNormalAccounts.length }} / {{ enabledAccountCount }} 个账号
               </p>
             </div>
+            <div class="account-section-controls">
+            <div class="account-section-filter-row">
+              <NSelect
+                v-model:value="normalFilters.accountType"
+                :options="accountTypeOptions"
+                clearable
+                filterable
+                size="small"
+                placeholder="正常类型"
+              />
+              <NSelect
+                v-model:value="normalFilters.priority"
+                :options="priorityFilterOptions"
+                size="small"
+                placeholder="正常优先级"
+              />
+              <NSelect
+                v-model:value="visibleNormalColumnKeys"
+                :options="accountColumnOptions"
+                multiple
+                size="small"
+                placeholder="显示列类目"
+                class="account-column-select"
+              />
+            </div>
+            <div class="account-section-actions">
+              <NButton
+                secondary
+                type="warning"
+                :disabled="!canBulkDisable"
+                :loading="isBulkToggling"
+                @click="submitBulkDisable"
+              >
+                批量禁用（{{ selectedNormalCount }}）
+              </NButton>
+              <NButton
+                secondary
+                type="info"
+                :disabled="!canBulkCheckNormal"
+                :loading="isBulkChecking"
+                @click="submitBulkCheck(selectedNormalAccountNames)"
+              >
+                查额度（{{ selectedNormalCount }}）
+              </NButton>
+            </div>
+            </div>
           </div>
           <NDataTable
             class="account-table"
@@ -896,9 +1196,12 @@ onMounted(loadAccounts)
             :loading="tableLoading"
             :columns="normalColumns"
             :data="filteredNormalAccounts"
+            :row-key="accountRowKey"
+            :checked-row-keys="selectedNormalAccountKeys"
             :pagination="accountTablePagination"
             table-layout="fixed"
             :scroll-x="normalTableScrollX"
+            @update:checked-row-keys="handleNormalSelectionUpdate"
           >
             <template #empty>
               <div class="empty-state">暂无正常账号</div>
@@ -1109,11 +1412,42 @@ onMounted(loadAccounts)
   font-size: 12px;
 }
 
+.account-section-controls {
+  display: grid;
+  flex-shrink: 0;
+  gap: 8px;
+  justify-items: end;
+}
+
+.account-section-filter-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 160px) minmax(150px, 190px) minmax(190px, 260px);
+  gap: 8px;
+}
+
+.account-column-select {
+  min-width: 0;
+}
+
 .account-section-actions {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   justify-content: flex-end;
+  gap: 10px;
+}
+
+.disabled-page-size-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.disabled-page-size-control :deep(.n-input-number) {
+  width: 72px;
 }
 
 .account-table :deep(.n-data-table-th) {
@@ -1201,6 +1535,18 @@ onMounted(loadAccounts)
 
 :global(.quota-window-fill.is-danger) {
   background: var(--cpa-danger);
+}
+
+:global(.free-weekly-reset) {
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+:global(.free-weekly-reset.is-known) {
+  color: var(--cpa-warning);
+  font-weight: 700;
 }
 
 :global(.latest-action-text) {

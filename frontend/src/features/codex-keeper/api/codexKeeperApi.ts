@@ -2,6 +2,9 @@ import { apiClient } from '@/shared/api/apiClient'
 import type {
   CodexKeeperBulkDeletePayload,
   CodexKeeperBulkDeleteResponse,
+  CodexKeeperRunOncePayload,
+  CodexKeeperBulkToggleResponse,
+  CodexKeeperBulkTogglePayload,
   CodexKeeperCronPreviewPayload,
   CodexKeeperCronPreviewResponse,
   CodexKeeperAccountsResponse,
@@ -34,8 +37,8 @@ export function listCodexKeeperAccounts(): Promise<CodexKeeperAccountsResponse> 
   return apiClient.get<CodexKeeperAccountsResponse>('/codex-keeper/accounts')
 }
 
-export function runCodexKeeperOnce(): Promise<void> {
-  return apiClient.post<void>('/codex-keeper/run-once')
+export function runCodexKeeperOnce(payload?: CodexKeeperRunOncePayload): Promise<void> {
+  return apiClient.post<void>('/codex-keeper/run-once', payload)
 }
 
 export function startCodexKeeper(): Promise<void> {
@@ -67,6 +70,24 @@ export function bulkDeleteCodexKeeperAccounts(
 ): Promise<CodexKeeperBulkDeleteResponse> {
   return apiClient.post<CodexKeeperBulkDeleteResponse>(
     '/codex-keeper/accounts/bulk-delete',
+    payload,
+  )
+}
+
+export function bulkEnableCodexKeeperAccounts(
+  payload: CodexKeeperBulkTogglePayload,
+): Promise<CodexKeeperBulkToggleResponse> {
+  return apiClient.post<CodexKeeperBulkToggleResponse>(
+    '/codex-keeper/accounts/bulk-enable',
+    payload,
+  )
+}
+
+export function bulkDisableCodexKeeperAccounts(
+  payload: CodexKeeperBulkTogglePayload,
+): Promise<CodexKeeperBulkToggleResponse> {
+  return apiClient.post<CodexKeeperBulkToggleResponse>(
+    '/codex-keeper/accounts/bulk-disable',
     payload,
   )
 }

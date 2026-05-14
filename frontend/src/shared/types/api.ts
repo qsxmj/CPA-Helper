@@ -162,6 +162,25 @@ export interface CodexKeeperBulkDeleteResponse {
   failed: CodexKeeperBulkDeleteFailure[]
 }
 
+export interface CodexKeeperRunOncePayload {
+  auth_names?: string[]
+}
+
+export interface CodexKeeperBulkTogglePayload {
+  auth_names: string[]
+}
+
+export interface CodexKeeperBulkToggleFailure {
+  name: string
+  message: string
+}
+
+export interface CodexKeeperBulkToggleResponse {
+  status: string
+  updated: string[]
+  failed: CodexKeeperBulkToggleFailure[]
+}
+
 export interface UsageFilters {
   scope?: 'admin' | 'account' | undefined
   start?: string | undefined
