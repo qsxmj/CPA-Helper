@@ -70,10 +70,99 @@ const disabledColumnOptions: Array<{ label: string; value: AccountColumnKey }> =
 const defaultAccountColumnKeys: AccountColumnKey[] = accountColumnOptions.map((option) => option.value)
 const defaultDisabledColumnKeys: AccountColumnKey[] = disabledColumnOptions.map((option) => option.value)
 
+const accountTableColumnWidthStorageKey = 'cpa-helper.codex-keeper.account-table.column-widths.v1'
+const accountTableDefaultColumnWidths: Record<AccountColumnKey | 'actions', number> = {
+  name: 240,
+  email: 220,
+  account_type: 56,
+  disabled: 68,
+  priority: 58,
+  quota: 240,
+  last_checked_at: 148,
+  latest_action: 260,
+  free_weekly_reset: 156,
+  actions: 196,
+}
+const accountTableMinColumnWidths: Record<AccountColumnKey | 'actions', number> = {
+  name: 120,
+  email: 120,
+  account_type: 48,
+  disabled: 56,
+  priority: 48,
+  quota: 140,
+  last_checked_at: 110,
+  latest_action: 140,
+  free_weekly_reset: 110,
+  actions: 150,
+}
+
+type ResizableAccountColumnKey = keyof typeof accountTableDefaultColumnWidths
+
+function loadStoredColumnWidths(): Partial<Record<ResizableAccountColumnKey, number>> {
+  try {
+    const rawValue = window.localStorage.getItem(accountTableColumnWidthStorageKey)
+    if (!rawValue) return {}
+    const parsed = JSON.parse(rawValue) as Record<string, unknown>
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([key, value]) =>
+          key in accountTableDefaultColumnWidths && typeof value === 'number' && Number.isFinite(value),
+      ),
+    ) as Partial<Record<ResizableAccountColumnKey, number>>
+  } catch {
+    return {}
+  }
+}
+
+const customColumnWidths = ref<Partial<Record<ResizableAccountColumnKey, number>>>(loadStoredColumnWidths())
+
+function saveColumnWidths() {
+  try {
+    window.localStorage.setItem(accountTableColumnWidthStorageKey, JSON.stringify(customColumnWidths.value))
+  } catch {
+    // ignore localStorage write failures
+  }
+}
+
+function columnWidth(key: ResizableAccountColumnKey) {
+  return customColumnWidths.value[key] ?? accountTableDefaultColumnWidths[key]
+}
+
+function applyResizableColumn(column: DataTableColumns<CodexKeeperAccount>[number], key: ResizableAccountColumnKey): DataTableColumns<CodexKeeperAccount>[number] {
+  return {
+    ...column,
+    resizable: true,
+    width: columnWidth(key),
+    minWidth: accountTableMinColumnWidths[key],
+  }
+}
+
+function handleAccountColumnResize(
+  _resizedWidth: number,
+  limitedWidth: number,
+  column: { key?: unknown },
+) {
+  const key = column.key
+  if (typeof key !== 'string' || !(key in accountTableDefaultColumnWidths)) return
+  customColumnWidths.value = {
+    ...customColumnWidths.value,
+    [key]: Math.round(limitedWidth),
+  }
+  saveColumnWidths()
+}
+
+function resetAccountTableColumnWidths() {
+  customColumnWidths.value = {}
+  try {
+    window.localStorage.removeItem(accountTableColumnWidthStorageKey)
+  } catch {
+    // ignore localStorage write failures
+  }
+}
+
 const accountTablePagination = { pageSize: 18, pageSlot: 7 }
 const disabledPageSize = ref(8)
-const disabledTableScrollX = 1970
-const normalTableScrollX = 1770
+const isCompactTable = ref(false)
 const message = useMessage()
 const isLoading = ref(false)
 const isBulkDeleting = ref(false)
@@ -700,61 +789,86 @@ async function runAccountAction(
   }
 }
 
-const baseColumns: DataTableColumns<CodexKeeperAccount> = [
-  { title: '账号', key: 'name', width: 300, ellipsis: { tooltip: true } },
-  { title: '邮箱', key: 'email', width: 260, ellipsis: { tooltip: true } },
-  {
-    title: '类型',
-    key: 'account_type',
-    width: 90,
-    render: (row) => row.account_type ?? '未知',
-  },
-  {
-    title: '状态',
-    key: 'disabled',
-    width: 90,
-    render: (row) =>
-      h(
-        NTag,
-        { size: 'small', bordered: false, type: row.disabled ? 'warning' : 'success' },
-        { default: () => (row.disabled ? '已禁用' : '启用中') },
-      ),
-  },
-  {
-    title: '优先级',
-    key: 'priority',
-    width: 88,
-    render: (row) => (row.priority === null ? '-' : formatInteger(row.priority)),
-  },
-  {
-    title: '额度窗口',
-    key: 'quota',
-    width: 260,
-    render: (row) => renderQuotaCell(row),
-  },
-  {
-    title: '最近巡检',
-    key: 'last_checked_at',
-    width: 150,
-    render: (row) => formatDateTime(row.last_checked_at),
-  },
-  {
-    title: '最近操作',
-    key: 'latest_action',
-    width: 340,
-    ellipsis: { tooltip: true },
-    render: (row) => {
-      const text = latestActionText(row)
-      return text === '-' ? '-' : h('span', { class: 'latest-action-text', title: text }, text)
+const baseColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
+  applyResizableColumn(
+    {
+      title: '账号',
+      key: 'name',
+      ellipsis: { tooltip: true },
     },
-  },
-]
+    'name',
+  ),
+  applyResizableColumn(
+    {
+      title: '邮箱',
+      key: 'email',
+      ellipsis: { tooltip: true },
+    },
+    'email',
+  ),
+  applyResizableColumn(
+    {
+      title: '类型',
+      key: 'account_type',
+      render: (row) => row.account_type ?? '未知',
+    },
+    'account_type',
+  ),
+  applyResizableColumn(
+    {
+      title: '状态',
+      key: 'disabled',
+      render: (row) =>
+        h(
+          NTag,
+          { size: 'small', bordered: false, type: row.disabled ? 'warning' : 'success' },
+          { default: () => (row.disabled ? '已禁用' : '启用中') },
+        ),
+    },
+    'disabled',
+  ),
+  applyResizableColumn(
+    {
+      title: '优先级',
+      key: 'priority',
+      render: (row) => (row.priority === null ? '-' : formatInteger(row.priority)),
+    },
+    'priority',
+  ),
+  applyResizableColumn(
+    {
+      title: '额度窗口',
+      key: 'quota',
+      render: (row) => renderQuotaCell(row),
+    },
+    'quota',
+  ),
+  applyResizableColumn(
+    {
+      title: '最近巡检',
+      key: 'last_checked_at',
+      render: (row) => formatDateTime(row.last_checked_at),
+    },
+    'last_checked_at',
+  ),
+  applyResizableColumn(
+    {
+      title: '最近操作',
+      key: 'latest_action',
+      ellipsis: { tooltip: true },
+      render: (row) => {
+        const text = latestActionText(row)
+        return text === '-' ? '-' : h('span', { class: 'latest-action-text', title: text }, text)
+      },
+    },
+    'latest_action',
+  ),
+])
 
-const disabledActionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
+const disabledActionColumn: DataTableColumns<CodexKeeperAccount>[number] = applyResizableColumn({
   title: '',
   key: 'actions',
-  width: 180,
-  fixed: 'right',
+  fixed: 'right' as const,
   render: (row: CodexKeeperAccount) => {
     return h(
       NSpace,
@@ -825,13 +939,12 @@ const disabledActionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
       },
     )
   },
-}
+}, 'actions')
 
-const normalActionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
+const normalActionColumn: DataTableColumns<CodexKeeperAccount>[number] = applyResizableColumn({
   title: '',
   key: 'actions',
-  width: 188,
-  fixed: 'right',
+  fixed: 'right' as const,
   render: (row: CodexKeeperAccount) => {
     return h(
       NSpace,
@@ -884,18 +997,17 @@ const normalActionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
       },
     )
   },
-}
+}, 'actions')
 
 const selectionColumn: DataTableColumns<CodexKeeperAccount>[number] = {
   type: 'selection',
-  width: 44,
+  minWidth: 44,
   disabled: (row: CodexKeeperAccount) => isRowActing(row) || isAnyBulkAction.value,
 }
 
-const freeWeeklyResetColumn: DataTableColumns<CodexKeeperAccount>[number] = {
+const freeWeeklyResetColumn: DataTableColumns<CodexKeeperAccount>[number] = applyResizableColumn({
   title: 'free周刷新',
   key: 'free_weekly_reset',
-  width: 160,
   render: (row: CodexKeeperAccount) => {
     const text = freeWeeklyResetText(row)
     const isKnownFreeReset = isFreeAccount(row) && text !== '未记录'
@@ -908,7 +1020,7 @@ const freeWeeklyResetColumn: DataTableColumns<CodexKeeperAccount>[number] = {
       text,
     )
   },
-}
+}, 'free_weekly_reset')
 
 function getAccountColumnKey(column: DataTableColumns<CodexKeeperAccount>[number]): AccountColumnKey | null {
   const key = (column as { key?: unknown }).key
@@ -918,7 +1030,7 @@ function getAccountColumnKey(column: DataTableColumns<CodexKeeperAccount>[number
 }
 
 const disabledDisplayColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
-  ...baseColumns,
+  ...baseColumns.value,
   freeWeeklyResetColumn,
 ].filter((column) => {
   const key = getAccountColumnKey(column)
@@ -926,7 +1038,7 @@ const disabledDisplayColumns = computed<DataTableColumns<CodexKeeperAccount>>(()
 }))
 
 const normalDisplayColumns = computed<DataTableColumns<CodexKeeperAccount>>(() =>
-  baseColumns.filter((column) => {
+  baseColumns.value.filter((column) => {
     const key = getAccountColumnKey(column)
     return key !== null && visibleNormalColumnKeys.value.includes(key)
   }),
@@ -943,6 +1055,17 @@ const normalColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
   ...normalDisplayColumns.value,
   normalActionColumn,
 ])
+
+const columnScrollX = (columns: DataTableColumns<CodexKeeperAccount>) =>
+  columns.reduce((total, column) => {
+    if ('type' in column && column.type === 'selection') return total + 48
+    const width = typeof column.width === 'number' ? column.width : 0
+    const minWidth = typeof column.minWidth === 'number' ? column.minWidth : 0
+    return total + Math.max(width, minWidth)
+  }, 0)
+
+const disabledTableScrollX = computed(() => columnScrollX(disabledColumns.value))
+const normalTableScrollX = computed(() => columnScrollX(normalColumns.value))
 
 watch(filteredDisabledAccounts, pruneSelectedDisabledAccountKeys)
 watch(filteredNormalAccounts, pruneSelectedNormalAccountKeys)
@@ -1074,6 +1197,12 @@ onMounted(loadAccounts)
               />
             </div>
             <div class="account-section-actions">
+              <NButton secondary size="small" @click="isCompactTable = !isCompactTable">
+                {{ isCompactTable ? '标准模式' : '紧凑模式' }}
+              </NButton>
+              <NButton secondary size="small" @click="resetAccountTableColumnWidths">
+                恢复默认列宽
+              </NButton>
               <div class="disabled-page-size-control">
                 <span>每页</span>
                 <NInputNumber
@@ -1127,6 +1256,7 @@ onMounted(loadAccounts)
             :pagination="disabledAccountPagination"
             table-layout="fixed"
             :scroll-x="disabledTableScrollX"
+            @unstable-column-resize="handleAccountColumnResize"
             @update:checked-row-keys="handleDisabledSelectionUpdate"
           >
             <template #empty>
@@ -1169,6 +1299,9 @@ onMounted(loadAccounts)
               />
             </div>
             <div class="account-section-actions">
+              <NButton secondary size="small" @click="isCompactTable = !isCompactTable">
+                {{ isCompactTable ? '标准模式' : '紧凑模式' }}
+              </NButton>
               <NButton
                 secondary
                 type="warning"
@@ -1201,6 +1334,7 @@ onMounted(loadAccounts)
             :pagination="accountTablePagination"
             table-layout="fixed"
             :scroll-x="normalTableScrollX"
+            @unstable-column-resize="handleAccountColumnResize"
             @update:checked-row-keys="handleNormalSelectionUpdate"
           >
             <template #empty>
