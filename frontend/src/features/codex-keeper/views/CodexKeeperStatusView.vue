@@ -2,6 +2,7 @@
 import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import {
   NButton,
+  NCheckbox,
   NDataTable,
   NDescriptions,
   NDescriptionsItem,
@@ -12,6 +13,7 @@ import {
   NInputNumber,
   NModal,
   NPopconfirm,
+  NPopover,
   NSelect,
   NSpace,
   NTag,
@@ -19,7 +21,7 @@ import {
   type DataTableColumns,
   type DataTableRowKey,
 } from 'naive-ui'
-import { Activity, AlertTriangle, Gauge, PauseCircle, RefreshCw, Users, Zap } from 'lucide-vue-next'
+import { Activity, AlertTriangle, Gauge, PauseCircle, RefreshCw, Settings, Users, Zap } from 'lucide-vue-next'
 
 import {
   bulkDeleteCodexKeeperAccounts,
@@ -69,6 +71,8 @@ const disabledColumnOptions: Array<{ label: string; value: AccountColumnKey }> =
 ]
 const defaultAccountColumnKeys: AccountColumnKey[] = accountColumnOptions.map((option) => option.value)
 const defaultDisabledColumnKeys: AccountColumnKey[] = disabledColumnOptions.map((option) => option.value)
+
+type QuotaRefreshBucket = 'oneDay' | 'twoDays' | 'threeToFiveDays' | 'sixToSevenDays'
 
 const accountTableColumnWidthStorageKey = 'cpa-helper.codex-keeper.account-table.column-widths.v1'
 const accountTableDefaultColumnWidths: Record<AccountColumnKey | 'actions', number> = {
@@ -174,8 +178,76 @@ const priorityRules = ref<CodexKeeperPriorityRule[]>([])
 const selectedAccount = ref<CodexKeeperAccount | null>(null)
 const selectedDisabledAccountKeys = ref<DataTableRowKey[]>([])
 const selectedNormalAccountKeys = ref<DataTableRowKey[]>([])
-const visibleDisabledColumnKeys = ref<AccountColumnKey[]>([...defaultDisabledColumnKeys])
-const visibleNormalColumnKeys = ref<AccountColumnKey[]>([...defaultAccountColumnKeys])
+
+// 字段配置的 LocalStorage Key
+const disabledColumnsStorageKey = 'cpa-helper.codex-keeper.disabled-columns'
+const normalColumnsStorageKey = 'cpa-helper.codex-keeper.normal-columns'
+
+function loadStoredColumns(key: string, defaults: AccountColumnKey[]): AccountColumnKey[] {
+  try {
+    const rawValue = window.localStorage.getItem(key)
+    if (!rawValue) return [...defaults]
+    const parsed = JSON.parse(rawValue)
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.filter((v): v is AccountColumnKey => typeof v === 'string')
+    }
+  } catch {
+    // ignore
+  }
+  return [...defaults]
+}
+
+function saveStoredColumns(key: string, values: AccountColumnKey[]) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(values))
+  } catch {
+    // ignore
+  }
+}
+
+const visibleDisabledColumnKeys = ref<AccountColumnKey[]>(loadStoredColumns(disabledColumnsStorageKey, defaultDisabledColumnKeys))
+const visibleNormalColumnKeys = ref<AccountColumnKey[]>(loadStoredColumns(normalColumnsStorageKey, defaultAccountColumnKeys))
+
+watch(visibleDisabledColumnKeys, (newVal) => {
+  saveStoredColumns(disabledColumnsStorageKey, newVal)
+}, { deep: true })
+
+watch(visibleNormalColumnKeys, (newVal) => {
+  saveStoredColumns(normalColumnsStorageKey, newVal)
+}, { deep: true })
+
+function handleDisabledColumnToggle(key: AccountColumnKey, checked: boolean) {
+  if (checked) {
+    if (!visibleDisabledColumnKeys.value.includes(key)) {
+      visibleDisabledColumnKeys.value.push(key)
+    }
+  } else {
+    if (visibleDisabledColumnKeys.value.length > 1) {
+      visibleDisabledColumnKeys.value = visibleDisabledColumnKeys.value.filter(k => k !== key)
+    }
+  }
+}
+
+function handleNormalColumnToggle(key: AccountColumnKey, checked: boolean) {
+  if (checked) {
+    if (!visibleNormalColumnKeys.value.includes(key)) {
+      visibleNormalColumnKeys.value.push(key)
+    }
+  } else {
+    if (visibleNormalColumnKeys.value.length > 1) {
+      visibleNormalColumnKeys.value = visibleNormalColumnKeys.value.filter(k => k !== key)
+    }
+  }
+}
+
+function resetDisabledColumns() {
+  visibleDisabledColumnKeys.value = [...defaultDisabledColumnKeys]
+}
+
+function resetNormalColumns() {
+  visibleNormalColumnKeys.value = [...defaultAccountColumnKeys]
+}
+
 const detailOpen = ref(false)
 const filters = reactive({
   keyword: '',
@@ -197,6 +269,99 @@ const priorityDialog = reactive({
   account: null as CodexKeeperAccount | null,
   value: null as number | null,
 })
+
+type MetricFilter =
+  | null
+  | 'error'
+  | 'systemPriority'
+  | 'highPriority'
+  | 'oneDay'
+  | 'twoDays'
+  | 'threeToFiveDays'
+  | 'sixToSevenDays'
+  | 'enabled'
+  | 'disabled'
+
+const activeMetricFilter = ref<MetricFilter>(null)
+
+const activeMetricFilterLabel = computed(() => {
+  switch (activeMetricFilter.value) {
+    case 'enabled': return '启用中'
+    case 'disabled': return '已禁用'
+    case 'error': return '检测异常'
+    case 'systemPriority': return '巡检托管'
+    case 'highPriority': return '手动优先'
+    case 'oneDay': return '1天刷新额度'
+    case 'twoDays': return '2天刷新额度'
+    case 'threeToFiveDays': return '3-5天刷新额度'
+    case 'sixToSevenDays': return '6-7天刷新额度'
+    default: return ''
+  }
+})
+
+function weeklyQuotaResetAt(account: CodexKeeperAccount): string | null {
+  if (isFreeAccount(account)) {
+    return account.primary_reset_at
+  }
+  if (isPaidQuotaWindowAccount(account.account_type)) {
+    return account.secondary_reset_at
+  }
+  return null
+}
+
+function getDaysUntilReset(account: CodexKeeperAccount): number | null {
+  if (account.disabled) return null
+  const resetAt = weeklyQuotaResetAt(account)
+  if (!resetAt) return null
+  const resetTime = new Date(resetAt).getTime()
+  const now = Date.now()
+  if (!Number.isFinite(resetTime) || resetTime <= now) return null
+  const millisecondsPerDay = 24 * 60 * 60 * 1000
+  return Math.ceil((resetTime - now) / millisecondsPerDay)
+}
+
+function matchesMetricFilter(account: CodexKeeperAccount): boolean {
+  if (!activeMetricFilter.value) return true
+
+  switch (activeMetricFilter.value) {
+    case 'enabled':
+      return !account.disabled
+    case 'disabled':
+      return account.disabled
+    case 'error':
+      return !!account.last_error
+    case 'systemPriority':
+      return !account.disabled && account.priority !== null && account.priority >= -1 && account.priority <= 20
+    case 'highPriority':
+      return account.priority !== null && account.priority > 20
+    case 'oneDay': {
+      const days = getDaysUntilReset(account)
+      return days !== null && days <= 1
+    }
+    case 'twoDays': {
+      const days = getDaysUntilReset(account)
+      return days !== null && days === 2
+    }
+    case 'threeToFiveDays': {
+      const days = getDaysUntilReset(account)
+      return days !== null && days >= 3 && days <= 5
+    }
+    case 'sixToSevenDays': {
+      const days = getDaysUntilReset(account)
+      return days !== null && days >= 6 && days <= 7
+    }
+    default:
+      return true
+  }
+}
+
+function toggleMetricFilter(filter: MetricFilter) {
+  if (activeMetricFilter.value === filter) {
+    activeMetricFilter.value = null
+  } else {
+    activeMetricFilter.value = filter
+  }
+}
 
 const priorityRuleMap = computed(() =>
   Object.fromEntries(priorityRules.value.map((rule) => [rule.account_type, rule.priority])),
@@ -237,12 +402,12 @@ const keywordFilteredAccounts = computed(() =>
 )
 const filteredDisabledAccounts = computed(() =>
   keywordFilteredAccounts.value.filter(
-    (account) => account.disabled && matchesAccountTableFilters(account, disabledFilters),
+    (account) => account.disabled && matchesAccountTableFilters(account, disabledFilters) && matchesMetricFilter(account),
   ),
 )
 const filteredNormalAccounts = computed(() =>
   keywordFilteredAccounts.value
-    .filter((account) => !account.disabled && matchesAccountTableFilters(account, normalFilters))
+    .filter((account) => !account.disabled && matchesAccountTableFilters(account, normalFilters) && matchesMetricFilter(account))
     .sort(compareNormalAccounts),
 )
 const tableLoading = computed(() => isLoading.value)
@@ -250,6 +415,59 @@ const enabledAccountCount = computed(() => accounts.value.filter((account) => !a
 const disabledAccountCount = computed(() => accounts.value.filter((account) => account.disabled).length)
 const hasDisabledAccounts = computed(() => disabledAccountCount.value > 0)
 const errorAccountCount = computed(() => accounts.value.filter((account) => account.last_error).length)
+
+// 我的额度已用：所有启用中且已记录额度的账号已用百分比累加，除以 100
+const totalUsedQuota = computed(() => {
+  const sum = accounts.value
+    .filter((acc) => !acc.disabled && acc.primary_used_percent !== null)
+    .reduce((acc, curr) => acc + (curr.primary_used_percent ?? 0), 0)
+  return (sum / 100).toFixed(1)
+})
+
+// 账号余额：启用账号数 - 已用额度
+const totalRemainingQuota = computed(() => {
+  const total = enabledAccountCount.value
+  const used = Number(totalUsedQuota.value)
+  return Math.max(0, total - used).toFixed(1)
+})
+
+// 启用账号占总数百分比
+const enabledPercent = computed(() => {
+  if (accounts.value.length === 0) return 0
+  return Math.round((enabledAccountCount.value / accounts.value.length) * 100)
+})
+
+const quotaRefreshBucketCounts = computed<Record<QuotaRefreshBucket, number>>(() => {
+  const counts: Record<QuotaRefreshBucket, number> = {
+    oneDay: 0,
+    twoDays: 0,
+    threeToFiveDays: 0,
+    sixToSevenDays: 0,
+  }
+  const now = Date.now()
+  const millisecondsPerDay = 24 * 60 * 60 * 1000
+
+  for (const account of accounts.value) {
+    if (account.disabled) continue
+    const resetAt = weeklyQuotaResetAt(account)
+    if (!resetAt) continue
+    const resetTime = new Date(resetAt).getTime()
+    if (!Number.isFinite(resetTime) || resetTime <= now) continue
+
+    const daysUntilReset = Math.ceil((resetTime - now) / millisecondsPerDay)
+    if (daysUntilReset <= 1) {
+      counts.oneDay += 1
+    } else if (daysUntilReset === 2) {
+      counts.twoDays += 1
+    } else if (daysUntilReset <= 5) {
+      counts.threeToFiveDays += 1
+    } else if (daysUntilReset <= 7) {
+      counts.sixToSevenDays += 1
+    }
+  }
+
+  return counts
+})
 const systemPriorityCount = computed(
   () =>
     accounts.value.filter(
@@ -269,7 +487,8 @@ const activeFilterCount = computed(
     Number(disabledFilters.accountType !== null) +
     Number(disabledFilters.priority !== 'all') +
     Number(normalFilters.accountType !== null) +
-    Number(normalFilters.priority !== 'all'),
+    Number(normalFilters.priority !== 'all') +
+    Number(activeMetricFilter.value !== null),
 )
 const disabledAccountPagination = computed(() => {
   const pageSize = disabledPageSize.value
@@ -839,6 +1058,11 @@ const baseColumns = computed<DataTableColumns<CodexKeeperAccount>>(() => [
     {
       title: '额度窗口',
       key: 'quota',
+      sorter: (rowA, rowB) => {
+        const a = rowA.primary_used_percent === null ? 100 : rowA.primary_used_percent
+        const b = rowB.primary_used_percent === null ? 100 : rowB.primary_used_percent
+        return a - b
+      },
       render: (row) => renderQuotaCell(row),
     },
     'quota',
@@ -1099,7 +1323,11 @@ onMounted(loadAccounts)
         <div class="metric-value">{{ formatInteger(accounts.length) }}</div>
         <div class="metric-footnote">全部 auth file</div>
       </div>
-      <div class="metric-card is-success">
+      <div
+        class="metric-card is-success is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'enabled' }"
+        @click="toggleMetricFilter('enabled')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <Activity :size="20" :stroke-width="2.2" />
         </div>
@@ -1107,7 +1335,11 @@ onMounted(loadAccounts)
         <div class="metric-value">{{ formatInteger(enabledAccountCount) }}</div>
         <div class="metric-footnote">可参与调度</div>
       </div>
-      <div class="metric-card is-warning">
+      <div
+        class="metric-card is-warning is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'disabled' }"
+        @click="toggleMetricFilter('disabled')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <PauseCircle :size="20" :stroke-width="2.2" />
         </div>
@@ -1115,7 +1347,29 @@ onMounted(loadAccounts)
         <div class="metric-value">{{ formatInteger(disabledAccountCount) }}</div>
         <div class="metric-footnote">停用账号</div>
       </div>
-      <div class="metric-card is-danger">
+      <div class="metric-card is-blue">
+        <div class="metric-icon" aria-hidden="true">
+          <Gauge :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">我的额度已用</div>
+        <div class="metric-value">{{ totalUsedQuota }}</div>
+        <div class="metric-footnote">折合账号额度</div>
+      </div>
+      <div class="metric-card is-success">
+        <div class="metric-icon" aria-hidden="true">
+          <Activity :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">账号余额</div>
+        <div class="metric-value">{{ totalRemainingQuota }}</div>
+        <div class="metric-footnote">
+          {{ enabledPercent }}% 按 100 算 · {{ formatInteger(enabledAccountCount) }} 个
+        </div>
+      </div>
+      <div
+        class="metric-card is-danger is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'error' }"
+        @click="toggleMetricFilter('error')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <AlertTriangle :size="20" :stroke-width="2.2" />
         </div>
@@ -1123,7 +1377,11 @@ onMounted(loadAccounts)
         <div class="metric-value">{{ formatInteger(errorAccountCount) }}</div>
         <div class="metric-footnote">最近错误</div>
       </div>
-      <div class="metric-card">
+      <div
+        class="metric-card is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'systemPriority' }"
+        @click="toggleMetricFilter('systemPriority')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <Gauge :size="20" :stroke-width="2.2" />
         </div>
@@ -1131,13 +1389,68 @@ onMounted(loadAccounts)
         <div class="metric-value">{{ formatInteger(systemPriorityCount) }}</div>
         <div class="metric-footnote">类型默认</div>
       </div>
-      <div class="metric-card">
+      <div
+        class="metric-card is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'highPriority' }"
+        @click="toggleMetricFilter('highPriority')"
+      >
         <div class="metric-icon" aria-hidden="true">
           <Zap :size="20" :stroke-width="2.2" />
         </div>
         <div class="metric-label">手动优先</div>
         <div class="metric-value">{{ formatInteger(highPriorityCount) }}</div>
         <div class="metric-footnote">高优先级</div>
+      </div>
+    </div>
+
+    <div class="metric-grid refresh-metrics">
+      <div
+        class="metric-card is-blue is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'oneDay' }"
+        @click="toggleMetricFilter('oneDay')"
+      >
+        <div class="metric-icon" aria-hidden="true">
+          <RefreshCw :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">1天刷新额度</div>
+        <div class="metric-value">{{ formatInteger(quotaRefreshBucketCounts.oneDay) }}</div>
+        <div class="metric-footnote">启用账号</div>
+      </div>
+      <div
+        class="metric-card is-blue is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'twoDays' }"
+        @click="toggleMetricFilter('twoDays')"
+      >
+        <div class="metric-icon" aria-hidden="true">
+          <RefreshCw :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">2天刷新额度</div>
+        <div class="metric-value">{{ formatInteger(quotaRefreshBucketCounts.twoDays) }}</div>
+        <div class="metric-footnote">启用账号</div>
+      </div>
+      <div
+        class="metric-card is-purple is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'threeToFiveDays' }"
+        @click="toggleMetricFilter('threeToFiveDays')"
+      >
+        <div class="metric-icon" aria-hidden="true">
+          <RefreshCw :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">3-5天刷新额度</div>
+        <div class="metric-value">{{ formatInteger(quotaRefreshBucketCounts.threeToFiveDays) }}</div>
+        <div class="metric-footnote">启用账号</div>
+      </div>
+      <div
+        class="metric-card is-purple is-clickable"
+        :class="{ 'is-active': activeMetricFilter === 'sixToSevenDays' }"
+        @click="toggleMetricFilter('sixToSevenDays')"
+      >
+        <div class="metric-icon" aria-hidden="true">
+          <RefreshCw :size="20" :stroke-width="2.2" />
+        </div>
+        <div class="metric-label">6-7天刷新额度</div>
+        <div class="metric-value">{{ formatInteger(quotaRefreshBucketCounts.sixToSevenDays) }}</div>
+        <div class="metric-footnote">启用账号</div>
       </div>
     </div>
 
@@ -1153,9 +1466,20 @@ onMounted(loadAccounts)
               </template>
             </p>
           </div>
-          <NTag v-if="activeFilterCount > 0" size="small" type="info" :bordered="false">
-            已筛选 {{ activeFilterCount }} 项
-          </NTag>
+          <NSpace align="center" :size="8">
+            <NTag
+              v-if="activeMetricFilter"
+              size="small"
+              type="primary"
+              closable
+              @close="activeMetricFilter = null"
+            >
+              卡片筛选：{{ activeMetricFilterLabel }}
+            </NTag>
+            <NTag v-if="activeFilterCount > 0" size="small" type="info" :bordered="false">
+              已筛选 {{ activeFilterCount }} 项
+            </NTag>
+          </NSpace>
         </div>
         <div class="filter-grid is-keyword-only">
           <NInput v-model:value="filters.keyword" clearable placeholder="搜索全部账号或邮箱" />
@@ -1187,14 +1511,33 @@ onMounted(loadAccounts)
                 size="small"
                 placeholder="已禁用优先级"
               />
-              <NSelect
-                v-model:value="visibleDisabledColumnKeys"
-                :options="disabledColumnOptions"
-                multiple
-                size="small"
-                placeholder="显示列类目"
-                class="account-column-select"
-              />
+              <NPopover trigger="click" placement="bottom-end" :width="200" class="column-config-popover">
+                <template #trigger>
+                  <NButton secondary size="small" class="column-config-btn">
+                    <template #icon>
+                      <NIcon><Settings /></NIcon>
+                    </template>
+                    显示列
+                  </NButton>
+                </template>
+                <div class="column-config-panel">
+                  <div class="column-config-header">
+                    <span class="column-config-title">⚙️ 字段显示配置</span>
+                    <NButton text size="tiny" type="primary" @click="resetDisabledColumns">重置</NButton>
+                  </div>
+                  <div class="column-config-list">
+                    <div v-for="option in disabledColumnOptions" :key="option.value" class="column-config-item">
+                      <NCheckbox
+                        :checked="visibleDisabledColumnKeys.includes(option.value)"
+                        :disabled="visibleDisabledColumnKeys.length === 1 && visibleDisabledColumnKeys.includes(option.value)"
+                        @update:checked="(checked) => handleDisabledColumnToggle(option.value, checked)"
+                      >
+                        {{ option.label }}
+                      </NCheckbox>
+                    </div>
+                  </div>
+                </div>
+              </NPopover>
             </div>
             <div class="account-section-actions">
               <NButton secondary size="small" @click="isCompactTable = !isCompactTable">
@@ -1289,14 +1632,33 @@ onMounted(loadAccounts)
                 size="small"
                 placeholder="正常优先级"
               />
-              <NSelect
-                v-model:value="visibleNormalColumnKeys"
-                :options="accountColumnOptions"
-                multiple
-                size="small"
-                placeholder="显示列类目"
-                class="account-column-select"
-              />
+              <NPopover trigger="click" placement="bottom-end" :width="200" class="column-config-popover">
+                <template #trigger>
+                  <NButton secondary size="small" class="column-config-btn">
+                    <template #icon>
+                      <NIcon><Settings /></NIcon>
+                    </template>
+                    显示列
+                  </NButton>
+                </template>
+                <div class="column-config-panel">
+                  <div class="column-config-header">
+                    <span class="column-config-title">⚙️ 字段显示配置</span>
+                    <NButton text size="tiny" type="primary" @click="resetNormalColumns">重置</NButton>
+                  </div>
+                  <div class="column-config-list">
+                    <div v-for="option in accountColumnOptions" :key="option.value" class="column-config-item">
+                      <NCheckbox
+                        :checked="visibleNormalColumnKeys.includes(option.value)"
+                        :disabled="visibleNormalColumnKeys.length === 1 && visibleNormalColumnKeys.includes(option.value)"
+                        @update:checked="(checked) => handleNormalColumnToggle(option.value, checked)"
+                      >
+                        {{ option.label }}
+                      </NCheckbox>
+                    </div>
+                  </div>
+                </div>
+              </NPopover>
             </div>
             <div class="account-section-actions">
               <NButton secondary size="small" @click="isCompactTable = !isCompactTable">
@@ -1555,7 +1917,7 @@ onMounted(loadAccounts)
 
 .account-section-filter-row {
   display: grid;
-  grid-template-columns: minmax(130px, 160px) minmax(150px, 190px) minmax(190px, 260px);
+  grid-template-columns: minmax(130px, 160px) minmax(150px, 190px) minmax(100px, 130px);
   gap: 8px;
 }
 
@@ -1772,5 +2134,72 @@ onMounted(loadAccounts)
   .filter-grid .n-input {
     grid-column: 1 / -1;
   }
+}
+
+.metric-card.is-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.metric-card.is-clickable.is-active {
+  border-color: var(--metric-color, var(--cpa-primary));
+  background: var(--metric-wash, var(--cpa-primary-weak));
+  box-shadow:
+    0 0 0 2px var(--metric-color, var(--cpa-primary)),
+    0 4px 18px -4px color-mix(in srgb, var(--metric-color, var(--cpa-primary)) 35%, transparent);
+  transform: translateY(-2px);
+}
+
+.refresh-metrics {
+  grid-template-columns: repeat(3, minmax(112px, 1fr));
+  margin-top: 14px;
+}
+
+@media (max-width: 560px) {
+  .refresh-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* 字段配置 Popover 容器及细节样式 */
+.column-config-btn {
+  width: 100%;
+}
+
+.column-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px;
+}
+
+.column-config-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--cpa-border);
+}
+
+.column-config-title {
+  font-weight: bold;
+  font-size: 13px;
+  color: var(--cpa-text);
+}
+
+.column-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.column-config-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.column-config-item :deep(.n-checkbox) {
+  width: 100%;
 }
 </style>
